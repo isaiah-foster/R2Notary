@@ -113,8 +113,11 @@ what such an attacker chooses not to log from then on.
 - **Real notification payloads** (D3.7): whether keys are URL-encoded, whether ETags are ever
   quoted. If keys are encoded, the auditor would report every such key as both unlogged and missing.
   Must be answered on real R2 before relying on audits.
-- **Create-only puts on real R2** (D2.1) and **list order / `startAfter` on real R2** (D6.2, D6.3).
-  Both pass locally; both have opt-in remote contract tests that have not been run.
+- **Create-only puts on real R2** (D2.1) pass the remote contract test (2026-10-17). **List order /
+  `startAfter` on real R2** (D6.2, D6.3) does not: a key that is a prefix of other keys is listed
+  out of UTF-8 order, so the auditor rejects the listing and never finishes on such a bucket (fails
+  closed, no false findings). Audits work only on buckets where no key is a prefix of another
+  (D9.1).
 - **Key rotation** has no cross-key verification path in the CLI yet (`docs/OPERATIONS.md`, D7.9).
 - **Witness freshness:** cosignature times could show a log that stopped growing, but the log asks
   witnesses only when it publishes, so an idle log's cosignatures age honestly (D8.7).

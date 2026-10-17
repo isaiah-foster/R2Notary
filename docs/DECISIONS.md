@@ -233,10 +233,9 @@ remote bindings. Code: `worker/src/{config,store,publish,sequencer}.ts`, `packag
   the object unchanged when present; the `If-None-Match: *` Headers form behaves the same; a
   concrete etag still compares; a wrong `sha256` is rejected; `putImmutable` semantics.
 - **Result:** passes against local R2 (wrangler 4.147.0 / workerd 1.20261001.1). The #6411
-  inversion is not present. **Not yet run against real R2**: that needs a bucket and the owner's
-  approval. The same contract runs remotely with `npm run test:contract:remote` (remote bindings,
-  which the docs confirm `@cloudflare/vitest-plugin` supports); see `docs/OPERATIONS.md`. Planned
-  for M6, as the plan says.
+  inversion is not present. The same contract runs remotely with `npm run test:contract:remote`
+  (remote bindings, which the docs confirm `@cloudflare/vitest-plugin` supports); see
+  `docs/OPERATIONS.md`. **Passed against real R2 on 2026-10-17** (D9.1).
 - **Defense in depth:** if R2 ever answers "precondition failed" for an absent object (an inverted
   implementation), `putImmutable` throws `ConditionalWriteError` instead of continuing. A silent
   overwrite cannot be detected by the writer alone; that is what the contract test is for.
@@ -902,8 +901,11 @@ integration test APIs (Workflows introspection), the wrangler config schema (`se
 - **Tests (PLAN M6 "Unicode-key ordering test"):** `worker/test/contract/r2-list-order.ts` checks
   that `list()` returns 18 keys chosen so the two orders differ in UTF-8 order, and that `startAfter`
   returns exactly the keys after it (present or not). The same contract is in the opt-in remote
-  harness (`npm run test:contract:remote`), **not yet run against real R2**. A DO test checks that
-  SQLite's `ORDER BY key` and `key > ?` agree with `compareUtf8`.
+  harness (`npm run test:contract:remote`). A DO test checks that SQLite's `ORDER BY key` and
+  `key > ?` agree with `compareUtf8`.
+- **Real R2 (2026-10-17, D9.1):** fails, but not over Unicode: a key that is a prefix of other keys
+  is listed out of UTF-8 order, and `startAfter` at such a key repeats keys. Prefix-free buckets
+  only, for now.
 
 ### D6.3 `startAfter` is used, and pinned by the contract test
 
@@ -1099,6 +1101,7 @@ the grace window, `now` the observation time, and `quiet(t)` meaning `t <= now -
   particular, if R2 URL-encodes keys in notifications, the auditor will report every such key as
   both `UNLOGGED_OBJECT` and `MISSING_OBJECT`.
 - **Real-R2 contract runs:** conditional writes (D2.1) and list order / `startAfter` (D6.2, D6.3).
+  Run on 2026-10-17: D9.1.
 - **Measurements:** auditor objects/s, deep-scrub MB/s, CPU per page (M7, §14). No figure is
   claimed.
 - Findings of scans before the latest are only in the log (and the reports), not in the API.
@@ -1592,3 +1595,54 @@ single sequencer (D7.8). Revisit with a measured need.
   than the 2 MB SQLite row limit" (1.4-2.5 s).
 - Whether the timeouts are fixed is confirmed only by several green `ts` runs, since the failure
   was intermittent.
+
+## Real R2 (2026-10-17)
+
+### D9.1 Contract tests on real R2: conditional writes pass, list order fails for prefix keys
+
+- **Run:** `npm run test:contract:remote` on 2026-10-17 against a dedicated, empty bucket, through
+  remote bindings (wrangler 4.147.0, workerd 1.20261001.1, `@cloudflare/vitest-plugin` 1.3.6).
+  This is the first run of either contract outside local R2.
+- **Conditional writes (D2.1): all 6 cases pass.** `etagDoesNotMatch: '*'` creates an absent
+  object and returns `null` without overwriting a present one; the `If-None-Match: *` Headers form
+  behaves the same; a concrete etag still compares; a wrong `sha256` stores nothing;
+  `putImmutable` semantics hold. `CREATE_ONLY` stays as it is.
+- **List order (D6.2, D6.3): 3 of 4 cases fail.** The key set check passes; `list()` order,
+  `startAfter` from each key, and paging by `startAfter` fail. The cause is not Unicode: every
+  non-ASCII and astral key comes back in UTF-8 order, which is what the contract was written for.
+  The cause is a key that is a **prefix of other keys**.
+- **What R2 does,** from a diagnostic probe (`worker/test-remote/r2-list-probe.remote.test.ts`,
+  35 keys: the contract's 18, plus `c` and `c` followed by one character from across the ranges):
+  - `list()` places a key that is a prefix of others as if a byte between `9` (0x39) and `:`
+    (0x3A) followed it: `c!` `c%` `c/` `c0` `c9` **`c`** `c:` `cA` `ca` `c~` `cé`. In UTF-8 order
+    `c` comes first. Every other pair is in UTF-8 order.
+  - `startAfter` agrees with neither order at such a key. `startAfter: "a"` returns `a b`, `a/b`,
+    `a0` and then `a` again, so paging by `startAfter` with `limit: 1` cycles
+    `a b → a/b → a0 → a → a b …` (the probe stopped it after 70 steps). `startAfter: "c:"` returns
+    `c`, which sorts before it either way. From any key that is not such a prefix, `startAfter`
+    returned exactly the keys after it.
+  - The rule is inferred from these 35 keys. It is not in the R2 docs, and it has not been checked
+    from a deployed Worker (remote bindings go through a proxy; ordering comes from R2 itself, so
+    the proxy is unlikely to change it).
+- **Consequence for the auditor:** `checkOrder` (`worker/src/audit/reconcile.ts`) rejects a listing
+  page that is not strictly increasing in UTF-8 order, so on a bucket with such keys a scan page
+  throws and the audit never finishes. It fails closed: no false findings. Common names trigger it:
+  `obj-1` is a prefix of `obj-10`, `2026` of `2026-01`, `a` of `a/b`. A bucket with no key that is a
+  prefix of another (zero-padded or fixed-width names, or a common suffix such as `.txt`) was listed
+  in UTF-8 order in every observed case, as the auditor expects.
+- **Decision (for now):** the real-R2 demo uses prefix-free key names (`docs/DEMO.md` §0: zero-padded
+  `demo/obj-001` … `demo/obj-300`, in a monitored bucket that holds only the demo's objects). The
+  auditor is unchanged, and the list-order contract stays as it is and keeps failing on real R2, so
+  the gap stays visible.
+- **Alternatives, not done:** (1) compare keys in the auditor in R2's order: a comparator that
+  appends the terminator to both keys, used by `checkOrder`, the merge-join and the SQLite side
+  (whose `ORDER BY key` would need a matching sort key). Local R2 lists in UTF-8 order, so it needs a
+  fake listing to test, and it rests on an inferred, undocumented rule. (2) Page with `cursor`
+  instead of `startAfter` and re-sort each page: the page end falls inside a listing page (D6.3),
+  and a page cannot be re-sorted across its boundary. (3) Report it to Cloudflare and ask which
+  order `list()` promises.
+- **Also found:** one probe call, `startAfter: "c\x7f"`, failed with HTTP 400 ("Unspecified error").
+  Remote bindings send the list options as JSON in an HTTP header (`MF-Header-cf-r2-request`), and
+  DEL is not allowed in a header value, so this is most likely the proxy and not R2; not checked
+  from a deployed Worker. The probe now needs a long timeout (about 100 remote calls) and
+  `--disableConsoleIntercept` to print its result.

@@ -1,7 +1,7 @@
 // Diagnostic, not a contract: records how real R2 orders keys and applies `startAfter`, after the
-// list-order contract failed on real R2 (DECISIONS D6.2). Asserts nothing; prints JSON to stdout.
-// Runs with the remote contract harness:
-//   npm run test:contract:remote -- r2-list-probe --silent=false > probe.json
+// list-order contract failed on real R2 (DECISIONS D6.2, results in D9.1). Asserts nothing; prints
+// JSON to stdout, which the workers pool swallows unless console interception is off:
+//   npm run test:contract:remote -- r2-list-probe --silent=false --disableConsoleIntercept
 // (R2_CONTRACT_LOCAL=1 for local R2, which agrees with UTF-8 order.)
 import { env } from 'cloudflare:workers';
 import { compareUtf8 } from '@r2notary/core';
@@ -26,29 +26,55 @@ async function list(options: R2ListOptions): Promise<string[]> {
   return page.objects.map((o) => o.key);
 }
 
-it('probe R2 list order and startAfter', async () => {
+/** A rejected call is a result too (R2 answered some startAfter values with a 400). */
+const errorText = (e: unknown): string => `error: ${e instanceof Error ? e.message : String(e)}`;
+
+// Every call is a remote round trip (about a hundred of them), far over vitest's 5 s default.
+it('probe R2 list order and startAfter', { timeout: 300_000 }, async () => {
   const full = KEYS.map((k) => prefix + k);
-  await Promise.all(full.map((k) => bucket().put(k, k)));
+  const putErrors: Record<string, string> = {};
+  await Promise.all(
+    full.map((k) =>
+      bucket()
+        .put(k, k)
+        .catch((e: unknown) => {
+          putErrors[show(k)] = errorText(e);
+        }),
+    ),
+  );
   const utf8 = [...full].sort(compareUtf8);
 
   const listed = await list({ limit: 1000 });
   const steps: string[] = [];
   let from = prefix;
   for (let i = 0; i < 2 * full.length; i++) {
-    const [next] = await list({ startAfter: from, limit: 1 });
+    let next: string | undefined;
+    try {
+      [next] = await list({ startAfter: from, limit: 1 });
+    } catch (e) {
+      steps.push(`${errorText(e)} (startAfter ${show(from)})`);
+      break;
+    }
     if (next === undefined) break;
-    steps.push(next);
+    steps.push(show(next));
     from = next;
   }
-  const after: Record<string, string[]> = {};
-  for (const k of utf8) after[show(k)] = (await list({ startAfter: k, limit: 1000 })).map(show);
+  const after: Record<string, string[] | string> = {};
+  for (const k of utf8) {
+    try {
+      after[show(k)] = (await list({ startAfter: k, limit: 1000 })).map(show);
+    } catch (e) {
+      after[show(k)] = errorText(e);
+    }
+  }
 
   console.log(
     JSON.stringify(
       {
+        putErrors,
         utf8Order: utf8.map(show),
         listOrder: listed.map(show),
-        startAfterChainLimit1: steps.map(show),
+        startAfterChainLimit1: steps,
         startAfterEachKey: after,
       },
       null,

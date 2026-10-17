@@ -72,6 +72,12 @@ If the conditional-write cases fail: switch `CREATE_ONLY` in `worker/src/publish
 overwrite would break I4). If the list-order cases fail, do not run the auditor against that
 bucket: its merge-join would report false findings (see DECISIONS D6.3 for the fallback).
 
+**Result on 2026-10-17 (DECISIONS D9.1):** conditional writes pass. List order fails for one
+reason: a key that is a prefix of other keys (`obj-1` and `obj-10`) is listed out of UTF-8 order,
+and `startAfter` at it repeats keys. The auditor rejects such a listing, so audits never finish on
+a bucket with such keys; on a bucket where no key is a prefix of another, run it. The demo uses
+zero-padded names for this reason (`docs/DEMO.md` §0).
+
 ## 3. Secrets (M4)
 
 Generate them locally, then put each one. The values never go in the repository.
@@ -116,6 +122,7 @@ The `r2notary-scan` Workflow is created by `wrangler deploy`; there is no separa
   audit; otherwise every pre-existing object is an `UNLOGGED_OBJECT`:
   `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" https://<host>/api/v1/admin/backfill`.
   `/api/v1/status` shows its progress under `backfill`.
+- **Key names:** until D9.1 is fixed, audit only buckets where no key is a prefix of another.
 - **Schedule:** the cron trigger (`0 */6 * * *`) starts an audit unless one is running.
 - **By hand:** `curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" https://<host>/api/v1/admin/scan`.
   The answer is 202 with the scan ID, or 409 with the scan in progress.
