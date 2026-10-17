@@ -8,8 +8,9 @@
   // Secrets: `.dev.vars` locally (`npm run keygen`), `wrangler secret put` remotely
   // (docs/OPERATIONS.md). READ_TOKEN is only used when PUBLIC_LOG is "false" (the default).
   // ALERT_WEBHOOK_URL (https, optional) is not listed: `required` is the only kind wrangler has.
-  // KEY_BLINDING_KEY is only used when KEY_BLINDING is "true" (M8); like READ_TOKEN, a listed secret
-  // that is not set only produces a local warning.
+  // KEY_BLINDING_KEY is only used when KEY_BLINDING is "true" (M8). `wrangler deploy` refuses a
+  // required secret that is not set, so scripts/deploy.ts drops it from the list it deploys with
+  // unless KEY_BLINDING is "true" (DECISIONS D9.4); locally an unset one only warns.
   "secrets": { "required": ["SIGNING_KEY", "ADMIN_TOKEN", "READ_TOKEN", "KEY_BLINDING_KEY"] },
 
   "exports": {

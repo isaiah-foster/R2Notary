@@ -17,3 +17,5 @@ cli/r2notary
 worker/deploy.local.json
 worker/wrangler.deploy.jsonc
 worker/test-remote/wrangler.remote.local.jsonc
+# keygen output for remote secrets (docs/OPERATIONS.md §3): never commit
+*.secrets

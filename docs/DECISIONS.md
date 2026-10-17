@@ -1736,3 +1736,20 @@ single sequencer (D7.8). Revisit with a measured need.
   committed configs logs the simulator's objects and finishes again.
 - **Not changed:** the real names remain in the history of 29d3df1 and of D9.2's commit (which
   regenerated `worker-configuration.d.ts` from it).
+
+### D9.4 `wrangler deploy` refuses an unset required secret: KEY_BLINDING_KEY is dropped unless blinding is on
+
+- **Found at the first real deploy (2026-10-17):** `✘ [ERROR] The following required secrets have not
+been set: KEY_BLINDING_KEY`. `worker/wrangler.jsonc` lists it under `secrets.required`, and its
+  comment said an unset listed secret only produces a warning; that holds for `wrangler dev`, not
+  for `wrangler deploy`. The Worker itself ignores the secret unless `KEY_BLINDING` is `"true"`
+  (`worker/src/blinding.ts`), and the Sequencer records a log without blinding as `off` whatever
+  secrets exist.
+- **Fix:** `scripts/deploy.ts` removes `KEY_BLINDING_KEY` from the required list of the config it
+  generates unless `KEY_BLINDING` (from `deploy.local.json`, else the committed value) is `"true"`;
+  with blinding on it stays required. The committed config keeps the full list, so `wrangler types`
+  and the local warning are unchanged. **Rejected:** putting a dummy value (it works, but leaves a
+  secret that looks meaningful and would be silently ignored); removing it from the committed list
+  (blinding on would then deploy without its key, and the Worker would fail at startup).
+- **Checked:** a dry run lists three required secrets by default and four with `KEY_BLINDING`
+  `"true"`. The deploy itself was not re-run by this change.

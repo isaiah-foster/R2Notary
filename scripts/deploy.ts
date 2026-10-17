@@ -70,6 +70,15 @@ for (const [name, value] of Object.entries(local.vars)) {
     );
   }
 }
+// `wrangler deploy` refuses a required secret that is not set, and KEY_BLINDING_KEY is used only
+// by a blinded log (D9.4). With blinding off it is not required, and need not be put.
+const blinding = local.vars.KEY_BLINDING ?? committed('KEY_BLINDING');
+if (blinding !== 'true') {
+  const required = /,\s*"KEY_BLINDING_KEY"(\s*\])/;
+  if (!required.test(text))
+    fail('KEY_BLINDING_KEY is not in the required secrets of wrangler.jsonc');
+  text = text.replace(required, '$1');
+}
 if (local.routes !== undefined) {
   text = text.replace('{', `{\n  "routes": ${JSON.stringify(local.routes)},`);
 }
