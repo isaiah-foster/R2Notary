@@ -105,8 +105,10 @@ BENCHMARKS, OPERATIONS, DEMO). See PLAN §4 for the full target layout.
 - Auditor (M6): scan state lives in the Sequencer (`worker/src/audit/store.ts`); each step is one
   synchronous transaction and is idempotent by page number / state, so a re-run step does nothing
   twice. The Workflow (`audit/scan.ts`) only drives it; keep control flow a function of step
-  results (replay). Compare keys with core `compareUtf8`, never `<` (D6.2). List pages with
-  `startAfter` only: Miniflare loops if `cursor` and `startAfter` are combined (D6.3). Findings are
+  results (replay). Compare keys with the scan's `ListOrder` (`audit/order.ts`), never `<` or
+  plain `compareUtf8`: real R2 lists by `key + ':'` (D9.1-D9.2; `LIST_ORDER`, `utf8` for local R2
+  and tests). List pages with `listAfter` only: Miniflare loops if `cursor` and `startAfter` are
+  combined (D6.3), and real R2's `startAfter` at a key repeats keys continuing it. Findings are
   confirmed only if the key's `objects` row is unchanged after the grace window (D6.5). Worker
   tests run with `AUDIT_GRACE_SECONDS=0` and `DEEP_SCRUB_SAMPLE_RATE=1` (vitest.config.ts).
   `x-reports/` is create-if-absent but, unlike tiles, not a pure function of the log prefix (D6.11).

@@ -11,9 +11,11 @@ describe('parseConfig', () => {
       AUDIT_GRACE_SECONDS: '300',
       DEEP_SCRUB_SAMPLE_RATE: '0',
       DEEP_SCRUB_MAX_BYTES: '104857600',
+      LIST_ORDER: 'r2',
     };
     expect(parseConfig(committed)).toMatchObject({
       auditGraceSeconds: 300,
+      listOrder: 'r2',
       deepScrubSampleRate: 0,
       deepScrubMaxBytes: 104_857_600,
       monitoredBucket: 'example-monitored-bucket',
@@ -39,6 +41,7 @@ describe('parseConfig', () => {
     ['a sample rate in exponent form', { DEEP_SCRUB_SAMPLE_RATE: '1e-3' }],
     ['a sample rate with a leading dot', { DEEP_SCRUB_SAMPLE_RATE: '.5' }],
     ['a fractional byte limit', { DEEP_SCRUB_MAX_BYTES: '1.5' }],
+    ['an unknown list order', { LIST_ORDER: 'bytes' }],
   ])('rejects %s', (_, override) => {
     expect(() => parseConfig({ ...env, ...override })).toThrow(ConfigError);
   });

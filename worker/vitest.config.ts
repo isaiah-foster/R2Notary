@@ -18,8 +18,11 @@ export default defineProject({
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
       // The auditor's end-to-end tests cannot wait out a real grace window (the clock only moves
-      // with I/O), and should exercise deep scrub. Unit tests pass both values explicitly.
-      miniflare: { bindings: { AUDIT_GRACE_SECONDS: '0', DEEP_SCRUB_SAMPLE_RATE: '1' } },
+      // with I/O), and should exercise deep scrub. Unit tests pass both values explicitly. Local R2
+      // lists in UTF-8 order; tests of real R2's order emulate it (test/r2-emulation.ts).
+      miniflare: {
+        bindings: { AUDIT_GRACE_SECONDS: '0', DEEP_SCRUB_SAMPLE_RATE: '1', LIST_ORDER: 'utf8' },
+      },
     }),
   ],
   test: {

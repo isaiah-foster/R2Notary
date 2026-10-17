@@ -903,9 +903,9 @@ integration test APIs (Workflows introspection), the wrangler config schema (`se
   returns exactly the keys after it (present or not). The same contract is in the opt-in remote
   harness (`npm run test:contract:remote`). A DO test checks that SQLite's `ORDER BY key` and
   `key > ?` agree with `compareUtf8`.
-- **Real R2 (2026-10-17, D9.1):** fails, but not over Unicode: a key that is a prefix of other keys
-  is listed out of UTF-8 order, and `startAfter` at such a key repeats keys. Prefix-free buckets
-  only, for now.
+- **Real R2 (2026-10-17, D9.1, D9.2):** R2 does not list in UTF-8 order when a key is a prefix of
+  others, and `startAfter` at such a key repeats keys. The auditor now follows R2's order
+  (`LIST_ORDER`, D9.2); the contract takes the order as a parameter.
 
 ### D6.3 `startAfter` is used, and pinned by the contract test
 
@@ -1101,7 +1101,7 @@ the grace window, `now` the observation time, and `quiet(t)` meaning `t <= now -
   particular, if R2 URL-encodes keys in notifications, the auditor will report every such key as
   both `UNLOGGED_OBJECT` and `MISSING_OBJECT`.
 - **Real-R2 contract runs:** conditional writes (D2.1) and list order / `startAfter` (D6.2, D6.3).
-  Run on 2026-10-17: D9.1.
+  Run on 2026-10-17: D9.1, D9.2.
 - **Measurements:** auditor objects/s, deep-scrub MB/s, CPU per page (M7, §14). No figure is
   claimed.
 - Findings of scans before the latest are only in the log (and the reports), not in the API.
@@ -1630,19 +1630,76 @@ single sequencer (D7.8). Revisit with a measured need.
   `obj-1` is a prefix of `obj-10`, `2026` of `2026-01`, `a` of `a/b`. A bucket with no key that is a
   prefix of another (zero-padded or fixed-width names, or a common suffix such as `.txt`) was listed
   in UTF-8 order in every observed case, as the auditor expects.
-- **Decision (for now):** the real-R2 demo uses prefix-free key names (`docs/DEMO.md` §0: zero-padded
-  `demo/obj-001` … `demo/obj-300`, in a monitored bucket that holds only the demo's objects). The
-  auditor is unchanged, and the list-order contract stays as it is and keeps failing on real R2, so
-  the gap stays visible.
-- **Alternatives, not done:** (1) compare keys in the auditor in R2's order: a comparator that
-  appends the terminator to both keys, used by `checkOrder`, the merge-join and the SQLite side
-  (whose `ORDER BY key` would need a matching sort key). Local R2 lists in UTF-8 order, so it needs a
-  fake listing to test, and it rests on an inferred, undocumented rule. (2) Page with `cursor`
-  instead of `startAfter` and re-sort each page: the page end falls inside a listing page (D6.3),
-  and a page cannot be re-sorted across its boundary. (3) Report it to Cloudflare and ask which
-  order `list()` promises.
+- **First decision (superseded the same day by D9.2):** the real-R2 demo used prefix-free key names
+  (zero-padded `demo/obj-001` … `demo/obj-300`) and the auditor was left unchanged.
+- **Alternatives considered:** (1) compare keys in the auditor in R2's order, on both sides of the
+  merge-join: done in D9.2. (2) Page with `cursor` instead of `startAfter` and re-sort each page:
+  the page end falls inside a listing page (D6.3), and a page cannot be re-sorted across its
+  boundary. (3) Report it to Cloudflare and ask which order `list()` promises: still worth doing,
+  since D9.2 rests on measured, undocumented behaviour.
 - **Also found:** one probe call, `startAfter: "c\x7f"`, failed with HTTP 400 ("Unspecified error").
   Remote bindings send the list options as JSON in an HTTP header (`MF-Header-cf-r2-request`), and
   DEL is not allowed in a header value, so this is most likely the proxy and not R2; not checked
   from a deployed Worker. The probe now needs a long timeout (about 100 remote calls) and
   `--disableConsoleIntercept` to print its result.
+
+### D9.2 The auditor follows real R2's list order
+
+- **A second probe (2026-10-17)** added keys continuing `c:` and `c9` (`c:0`, `c:9`, `c::`, `c:A`,
+  `c;`, `c9z`) and, for each of the 41 keys X, `startAfter: X + '9' + U+10FFFF`. Results, with the
+  first probe's, are in `worker/test/fixtures/r2-list-2026-10-17.json`:
+  - R2 lists `c` **between `c:0` and `c:9`**. So it does not sort `key + ':'` alone: something
+    hidden follows the `:`, starting with a digit (a version or a time, perhaps). No function of
+    the keys reproduces R2's order for a key `k` next to `k + ':' + r` with r starting with a byte
+    up to '9'. For every other pair of the 41 keys, R2's order is UTF-8 order of `key + ':'`.
+  - `startAfter: X + '9' + U+10FFFF` returned exactly the keys after X in that order, plus X itself,
+    for 40 of the 41 keys. The exception is `c:0`, which also returned `c`: the same hidden suffix.
+- **Decision:** the auditor reads both sides of the merge-join in a **list order**
+  (`worker/src/audit/order.ts`), chosen by a new var `LIST_ORDER`:
+  - `r2` (committed default): compare `key + ':'` in UTF-8 order. A page after X lists from
+    `startAfter: X + '9' + U+10FFFF` and drops X itself (`listAfter`); it asks for one more key so a
+    page still holds `limit` keys after the drop, and trims the extra when X was not listed.
+  - `utf8`: the M6 behaviour, for local R2 (Miniflare), which lists in UTF-8 order. Set in
+    `worker/vitest.config.ts`, by the dev harness (`scripts/lib/dev.ts`), and by the README
+    quickstart in `worker/.dev.vars`.
+  - SQLite: `objectStates` orders and bounds by `key || ':'` for `r2` (BINARY collation is byte
+    order, so it equals the comparator). Schema v5 replaces the partial index `objects_live` with
+    `objects_live_r2` on that expression, instead of adding a second index, so each event writes the
+    same index rows as before; `EXPLAIN QUERY PLAN` shows the range scan uses it without a sort.
+    Only the clauses in use are written now (no `?1 IS NULL OR ...`), so the bounds are index
+    ranges in both orders.
+  - **Each scan records its order** (`scans.list_order`, v5) at start and uses it for every page,
+    whatever LIST_ORDER is later: a deploy that changes LIST_ORDER mid-scan would otherwise join
+    pages read in two orders and could skip keys silently. Scans from before v5 keep `utf8`.
+- **Why nothing is skipped silently:** a page's listing must be strictly increasing in the scan's
+  order and after its start, or the merge-join refuses it (`checkOrder`, unchanged in substance).
+  Given the observed `startAfter` rule (returns the keys whose internal key is greater, except an
+  exact match), the start `X + '9' + U+10FFFF` is below the internal key of every key after X,
+  so no key after X is left out; and a key R2 places out of order (the `k` / `k:0` case) shows up
+  either inside a page or at the start of the next one, both refused. The refusal also covers a
+  wrong LIST_ORDER: its error names LIST_ORDER and this entry. A refused page fails the scan's step;
+  as for any failed scan, a new one is refused until the stuck scan is stale (`STALE_SCAN_MS`, 24 h).
+- **Tests:** the merge-join property test runs in both orders with prefix keys; `objectStates` is
+  checked against the comparator in both orders, bounds included; a v4 database migrates with its
+  scan in progress kept in `utf8`. `worker/test/r2-emulation.ts` emulates real R2's listing over
+  local R2 (`key + ':5'` as the internal key), and `r2-emulation.test.ts` checks it reproduces
+  every recorded listing and `startAfter` result, that R2_ORDER misorders only `c`/`c:0`, and that
+  its start never misses a key. The list-order contract (`worker/test/contract/r2-list-order.ts`) now
+  takes an order and pages through `listAfter` itself, so it tests the auditor's code: it runs on
+  local R2 (`utf8`), on the emulation and on real R2 (`r2`). End to end (`audit-scan.test.ts`),
+  audits and a backfill of prefix keys give the same findings at page sizes 1, 2, 3 and 1000, and
+  a wrong order or a `c`/`c:0` bucket stops with no findings. Under `wrangler dev`, an audit with
+  the harness default (`utf8`) finished with the expected finding; with `LIST_ORDER=r2` it stopped
+  on its first page.
+- **Real R2 (2026-10-17):** `npm run test:contract:remote` passes all 10 cases, the 4 list-order
+  cases included (they failed before this change).
+- **Benchmarks:** `bench:amplification` was re-run for 1-200 entries per publication on this change
+  and on the commit before it: every count is identical except a one-time +55 rows read and +2
+  rows written in the first ingest (the v5 migration), so per-event figures (§3, §7) stand.
+  `bench/results/amplification.json` is not regenerated: its 500-entry case fails on the commit
+  before this change too (the first alarm is not scheduled when that size runs alone), which is not
+  investigated here. The auditor benchmark (§6, `wrangler dev`, `utf8`) was not re-run.
+- **Not covered:** the `k` / `k:<digit…>` case still stops an audit; supporting it needs R2's hidden
+  suffix, which `list()` does not return. The rule rests on 41 keys measured through remote
+  bindings, not on documentation, and not yet from a deployed Worker. The real-R2 demo
+  (`docs/DEMO.md`) uses `demo/obj-1` … `demo/obj-300` again, which exercise prefix keys.

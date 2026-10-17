@@ -83,6 +83,10 @@
     // Deep scrub reads object bodies (billed reads, CPU): off unless set, e.g. "0.01".
     "DEEP_SCRUB_SAMPLE_RATE": "0",
     "DEEP_SCRUB_MAX_BYTES": "104857600",
+    // How the monitored bucket lists keys, which the auditor's merge-join must follow: "r2" for real
+    // R2, "utf8" for local R2 under wrangler dev (set it in worker/.dev.vars). They differ when one
+    // key is a prefix of another (DECISIONS D9.1); a wrong value stops audits, it does not mislead.
+    "LIST_ORDER": "r2",
     "PUBLIC_LOG": "false",
     // Witnesses (C2SP tlog-witness, M8): a JSON array of {"vkey": "<cosigner vkey>", "url":
     // "https://<submission prefix>"}. Each checkpoint is submitted to every witness before it is

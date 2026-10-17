@@ -1,4 +1,4 @@
-// Auditor state in the Sequencer's SQLite (schema v3), and every step of a scan as one synchronous
+// Auditor state in the Sequencer's SQLite (schema v3, v5), and every step of a scan as one synchronous
 // transaction. The scan Workflow (scan.ts) only drives these steps; the state lives here, next to
 // the objects view the merge-join reads and the log the results are appended to. That gives:
 //
@@ -26,6 +26,7 @@ import {
   type ObjectName,
 } from '@r2notary/core';
 import type { AppendItem, SequencerStore } from '../store.ts';
+import { LIST_ORDERS, listOrder, type ListOrderName } from './order.ts';
 import {
   checkOrder,
   pageEnd,
@@ -58,6 +59,8 @@ export interface ScanSummary {
   readonly finishedAt: number | null;
   /** Published log size when the scan started (after flushing pending entries). */
   readonly logSizeAtStart: number;
+  /** The list order every page of this scan is read and merged in (LIST_ORDER at its start). */
+  readonly listOrder: ListOrderName;
   /** Pages applied so far, and the last key they covered (null before the first page). */
   readonly pages: number;
   readonly cursor: string | null;
@@ -128,6 +131,8 @@ export interface ScanContext {
    * the Sequencer before the step, since HMACs are asynchronous and a step is not.
    */
   readonly names: ReadonlyMap<string, string> | null;
+  /** LIST_ORDER: recorded by a scan's start; every later step uses the recorded order. */
+  readonly listOrder: ListOrderName;
 }
 
 export interface ScanReport {
@@ -180,6 +185,7 @@ interface ScanRow {
   snapshots: number;
   start_seq: number | null;
   end_seq: number | null;
+  list_order: string;
 }
 
 const ACTIVE = "state NOT IN ('done', 'abandoned')";
@@ -267,6 +273,7 @@ export class AuditStore {
       updatedAt: r.updated_at,
       finishedAt: r.finished_at,
       logSizeAtStart: r.log_size_at_start,
+      listOrder: r.list_order as ListOrderName,
       pages: r.pages,
       cursor: r.cursor,
       objectsScanned: r.objects_scanned,
@@ -366,6 +373,7 @@ export class AuditStore {
     if (!SCAN_ID_RE.test(scanId))
       throw new AuditInputError('scanId must match ' + SCAN_ID_RE.source);
     if (!SCAN_MODES.includes(mode)) throw new AuditInputError('unknown scan mode');
+    if (!LIST_ORDERS.includes(ctx.listOrder)) throw new AuditInputError('unknown list order');
     return this.#storage.transactionSync(() => {
       const existing = this.#row(scanId);
       if (existing !== null) {
@@ -401,8 +409,8 @@ export class AuditStore {
       }
       this.#sql.exec(
         `INSERT INTO scans(scan_id, mode, state, grace_seconds, started_at, updated_at,
-           log_size_at_start, start_seq)
-         VALUES (?, ?, 'listing', ?, ?, ?, ?, ?)`,
+           log_size_at_start, start_seq, list_order)
+         VALUES (?, ?, 'listing', ?, ?, ?, ?, ?, ?)`,
         scanId,
         mode,
         graceSeconds,
@@ -410,6 +418,7 @@ export class AuditStore {
         ctx.now,
         logSize,
         startSeq,
+        ctx.listOrder,
       );
       const row = this.#row(scanId);
       if (row === null) throw new Error('unreachable');
@@ -443,11 +452,13 @@ export class AuditStore {
       let scanned: number;
       let candidates: Candidate[] = [];
       let snapshots = 0;
+      const order = listOrder(s.list_order as ListOrderName);
       if (s.mode === 'audit') {
         const live = this.#log.objectStates({
           ...(req.after === null ? {} : { after: req.after }),
           limit: req.liveLimit + 1,
           liveOnly: true,
+          order: order.name,
         });
         const rows = new Map(
           req.listed.flatMap((o) => {
@@ -464,6 +475,7 @@ export class AuditStore {
           rows,
           now: ctx.now,
           graceMs: s.grace_seconds * 1000,
+          order,
         });
         ({ end, scanned, candidates } = r);
         for (const c of candidates) {
@@ -483,8 +495,9 @@ export class AuditStore {
           req.listed.map((o) => o.key),
           req.after,
           'listing',
+          order,
         );
-        end = pageEnd(req.listed, req.listTruncated, [], false);
+        end = pageEnd(req.listed, req.listTruncated, [], false, order);
         scanned = req.listed.length;
         req.listed.forEach((o, i) => {
           // Only objects the log has never named. A key the log knows (even as deleted) is the

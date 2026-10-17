@@ -292,8 +292,16 @@ describe('objects view and key index', () => {
   });
 });
 
+/** Undoes schema v5 (D9.1), as a database written by M8 would look. */
+function rollBackV5(sql: SqlStorage): void {
+  sql.exec('DROP INDEX objects_live_r2');
+  sql.exec('CREATE INDEX objects_live ON objects(key) WHERE deleted = 0');
+  sql.exec('ALTER TABLE scans DROP COLUMN list_order');
+}
+
 /** Removes what schema v4 (M8) added, as a database written by M6-M7 would look. */
 function rollBackV4(sql: SqlStorage): void {
+  rollBackV5(sql);
   sql.exec('DROP TABLE witnesses');
   sql.exec('ALTER TABLE entries DROP COLUMN object_key');
   sql.exec('ALTER TABLE objects DROP COLUMN key_hmac');
@@ -319,6 +327,29 @@ describe('store internals', () => {
         state.storage.sql.exec('SELECT v FROM meta WHERE k = ?', 'schema_version').one().v,
       ).toBe(SCHEMA_VERSION);
     });
+  });
+
+  it('upgrades a v4 database to v5 (list order): a scan in progress keeps UTF-8 order', async () => {
+    const s = stub();
+    await s.append(items(3));
+    await s.publish();
+    await s.scanStart('old-scan', 'audit');
+    await runInDurableObject(s, (_, state) => {
+      const sql = state.storage.sql;
+      rollBackV5(sql);
+      sql.exec("UPDATE meta SET v = 4 WHERE k = 'schema_version'");
+      new SequencerStore(state.storage).migrate();
+      expect(sql.exec<{ list_order: string }>('SELECT list_order FROM scans').toArray()).toEqual([
+        { list_order: 'utf8' },
+      ]);
+      const indexes = sql
+        .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .toArray()
+        .map((r) => r.name);
+      expect(indexes).toContain('objects_live_r2');
+      expect(indexes).not.toContain('objects_live');
+    });
+    expect(await s.scanState('old-scan')).toMatchObject({ listOrder: 'utf8', state: 'listing' });
   });
 
   it('upgrades a v3 database to v4 (witness state) and keeps publishing', async () => {

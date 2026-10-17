@@ -17,15 +17,15 @@ names are the committed placeholders; use your own.
 ## 0. Prerequisites
 
 - Everything in `docs/OPERATIONS.md` up to and including the auditor section: both buckets, the
-  queues and the notification rule, the secrets, and the R2 contract tests run against real R2.
-  On 2026-10-17 conditional writes passed and list order failed, for one reason (DECISIONS D9.1),
-  which this runbook avoids with its key names (below). If either contract fails in any other way,
-  stop: the log or the auditor cannot be trusted on that bucket.
-- **Key names: no key may be a prefix of another key.** Real R2 lists `demo/obj-1` after
-  `demo/obj-10` and `startAfter: "demo/obj-1"` returns `demo/obj-10` again, so the auditor rejects
-  the listing and the audit never finishes (D9.1). The runbook therefore uses zero-padded names
-  (`demo/obj-001` … `demo/obj-300`). This applies to every key the auditor ever sees, so use a
-  monitored bucket that holds only the demo's objects.
+  queues and the notification rule, the secrets, and **both R2 contract tests passing against real
+  R2** (conditional writes and list order; both passed on 2026-10-17, DECISIONS D9.2). If the
+  list-order contract fails, stop: the auditor's list order does not match that R2.
+- `LIST_ORDER` is `"r2"` in `worker/wrangler.jsonc` (the committed value). Real R2 lists
+  `demo/obj-1` after `demo/obj-10` … `demo/obj-199`, not before them as UTF-8 order would; the
+  auditor follows that order (D9.1, D9.2), and this runbook's names exercise it.
+- One kind of key still stops an audit: a key `k` next to `k:` followed by a digit or another byte
+  up to `9` (`c` and `c:0`), which R2 orders by data `list()` does not return. The demo has none;
+  use a monitored bucket that holds only the demo's objects.
 - The Worker deployed (`npx wrangler deploy -c worker/wrangler.jsonc`) and reachable at `$HOST`.
 - The Go CLI built (`cd cli && go build -o r2notary ./cmd/r2notary`), and:
 
@@ -40,7 +40,7 @@ auth=(-H "Authorization: Bearer $ADMIN_TOKEN")
 ## 1. Log ordinary writes
 
 ```sh
-for i in $(seq -w 1 300); do   # 001..300 (zero-padded, §0); 300 so step 5 has a full tile
+for i in $(seq 1 300); do   # 300, so that step 5 has a full tile to corrupt
   echo "object $i" > /tmp/obj.txt
   npx wrangler r2 object put "$B/demo/obj-$i" --file /tmp/obj.txt --remote
 done
@@ -53,7 +53,7 @@ $HOST/api/v1/status` shows `size` of at least 301 and `pending` 0), then:
 
 ```sh
 ./r2notary checkpoint --log $LOG --vkey "$VKEY" --out before.cp
-./r2notary inclusion  --log $LOG --vkey "$VKEY" --key demo/obj-001
+./r2notary inclusion  --log $LOG --vkey "$VKEY" --key demo/obj-1
 ./r2notary inclusion  --log $LOG --vkey "$VKEY" --key 'demo/with space/é+%.txt'
 ./r2notary monitor    --log $LOG --vkey "$VKEY" --state mon.json --once -q
 ```
@@ -87,8 +87,8 @@ npx wrangler r2 bucket notification delete $B --queue r2notary-events
 echo sneaky > /tmp/sneaky.txt
 npx wrangler r2 object put "$B/demo/unlogged" --file /tmp/sneaky.txt --remote   # new object
 echo "rewritten 2" > /tmp/obj.txt
-npx wrangler r2 object put "$B/demo/obj-002" --file /tmp/obj.txt --remote      # overwrite
-npx wrangler r2 object delete "$B/demo/obj-003" --remote                        # delete
+npx wrangler r2 object put "$B/demo/obj-2" --file /tmp/obj.txt --remote        # overwrite
+npx wrangler r2 object delete "$B/demo/obj-3" --remote                          # delete
 npx wrangler r2 bucket notification create $B --event-type object-create --event-type object-delete --queue r2notary-events --description r2notary
 ```
 
@@ -104,7 +104,7 @@ window, then run a scan as in step 2.
 ```
 
 **Expected:** three proven findings of the new scan, `UNLOGGED_OBJECT demo/unlogged`,
-`ETAG_MISMATCH demo/obj-002` and `MISSING_OBJECT demo/obj-003`, with the count confirmed by the
+`ETAG_MISMATCH demo/obj-2` and `MISSING_OBJECT demo/obj-3`, with the count confirmed by the
 scan's signed end entry. The log is consistent with `before.cp`, and the monitor prints the
 scan's entries. The report is in the log bucket at `example-log/x-reports/<scanId>.json`.
 
@@ -147,5 +147,5 @@ first entry, so it needs its own log (§12 there).
 
 ## 6. Clean up
 
-Delete the demo objects (`npx wrangler r2 object delete "$B/demo/obj-$i" --remote` for each `i` in
-`$(seq -w 1 300)`), or the whole setup as described in `docs/OPERATIONS.md`. The log keeps its history: that is the point.
+Delete the demo objects (`npx wrangler r2 object delete "$B/demo/obj-$i" --remote` for each), or the
+whole setup as described in `docs/OPERATIONS.md`. The log keeps its history: that is the point.

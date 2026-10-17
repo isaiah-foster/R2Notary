@@ -15,6 +15,9 @@
 //   scans, scan_candidates, scan_findings   auditor state (v3; worker/src/audit/store.ts)
 //   witnesses   per witness: the size it last cosigned, and the last error (v4, M8)
 //
+// v5 (D9.1): the auditor reads the objects view in the scan's list order (audit/order.ts), so the
+// live-key index is on `key || ':'`, the order real R2 lists keys in, and each scan records its order.
+//
 // Key blinding (v4, M8): a blinded entry names its object by keyHmac only, but the expected-state
 // view and the auditor work on real keys. So `entries.object_key` keeps the plaintext key of a
 // blinded entry (private: never published, dropped with the row), `objects.key_hmac` keeps the
@@ -28,6 +31,7 @@ import {
   type LogState,
   type TreeState,
 } from '@r2notary/core';
+import type { ListOrderName } from './audit/order.ts';
 
 export interface AppendItem {
   readonly eventId: string;
@@ -99,6 +103,8 @@ export interface ObjectRange {
   readonly limit: number;
   /** Only keys the log shows as present (not deleted). */
   readonly liveOnly?: boolean;
+  /** The order of keys, the bounds included (audit/order.ts). Default `utf8`. */
+  readonly order?: ListOrderName;
 }
 
 /** The last published deep-scrub observation of a key (for CONTENT_DRIFT). */
@@ -210,6 +216,15 @@ const MIGRATIONS: readonly (readonly string[])[] = [
        cosigned_at INTEGER,
        failed_at INTEGER,
        last_error TEXT)`,
+  ],
+  // v5 (D9.1): real R2 lists keys in the order of `key || ':'`, not of `key`. The auditor's range
+  // scan of live keys uses that order in production, so the partial index moves to it rather than
+  // adding a second one (the same rows written per event). A scan keeps the order it started with:
+  // a deploy that changes LIST_ORDER mid-scan would otherwise join pages read in two orders.
+  [
+    `DROP INDEX objects_live`,
+    `CREATE INDEX objects_live_r2 ON objects(key || ':') WHERE deleted = 0`,
+    `ALTER TABLE scans ADD COLUMN list_order TEXT NOT NULL DEFAULT 'utf8'`,
   ],
 ];
 
@@ -657,16 +672,31 @@ export class SequencerStore {
     );
   }
 
-  /** Expected state for keys in (after, through], in key order (SQLite BINARY = UTF-8 byte order). */
+  /**
+   * Expected state for keys in (after, through], in `range.order`: SQLite's BINARY collation is
+   * UTF-8 byte order, of `key` for `utf8` and of `key || ':'` for `r2` (audit/order.ts). Only the
+   * clauses in use are written, and `deleted = 0` literally, so the partial index applies.
+   */
   objectStates(range: ObjectRange): ObjectState[] {
+    const sortKey = range.order === 'r2' ? `key || ':'` : 'key';
+    const bound = range.order === 'r2' ? `? || ':'` : '?';
+    const where: string[] = [];
+    const args: SqlStorageValue[] = [];
+    if (range.after !== undefined) {
+      where.push(`${sortKey} > ${bound}`);
+      args.push(range.after);
+    }
+    if (range.through !== undefined) {
+      where.push(`${sortKey} <= ${bound}`);
+      args.push(range.through);
+    }
+    if (range.liveOnly === true) where.push('deleted = 0');
     const rows = this.#sql.exec<ObjectRow>(
       `SELECT ${OBJECT_COLUMNS} FROM objects
-       WHERE (?1 IS NULL OR key > ?1) AND (?2 IS NULL OR key <= ?2) AND (?4 = 0 OR deleted = 0)
-       ORDER BY key LIMIT ?3`,
-      range.after ?? null,
-      range.through ?? null,
+       ${where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`}
+       ORDER BY ${sortKey} LIMIT ?`,
+      ...args,
       range.limit,
-      range.liveOnly === true ? 1 : 0,
     );
     return rows.toArray().map(toObjectState);
   }

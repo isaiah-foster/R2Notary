@@ -4,19 +4,22 @@
 // at every step (PLAN M6), hand-off between instances, the grace window, and deep scrub.
 import { decodeEntry, sha256, toHex, utf8Encode, type Entry } from '@r2notary/core';
 import { env } from 'cloudflare:workers';
-import { reset } from 'cloudflare:test';
+import { reset, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { ListOrderName } from '../src/audit/order.ts';
 import {
   DEFAULT_BUDGET,
   runScan,
   type ScanDeps,
   type ScanOutcome,
   type ScanParams,
+  type ScanSequencer,
   type StepConfig,
   type StepLike,
 } from '../src/audit/scan.ts';
 import type { Sequencer } from '../src/sequencer.ts';
 import { objectEvent, publishedEntries, putObject, readBytes } from './helpers.ts';
+import { realR2Listing } from './r2-emulation.ts';
 
 afterEach(() => reset());
 
@@ -396,5 +399,123 @@ describe('backfill', () => {
     ]);
     const audit = await drive(PARAMS, new ReplayStep(), deps(stub).d);
     expect(audit.findings).toBe(4); // the two unlogged objects are now accounted for
+  });
+});
+
+describe('real R2 list order (emulated, D9.1)', () => {
+  /**
+   * The Sequencer called in-process, so a refused page is an ordinary rejection rather than an
+   * unhandled one in the test pool (D2.9), with its scans started in `listOrder`.
+   */
+  function inProcess(stub: DurableObjectStub<Sequencer>, listOrder: ListOrderName): ScanSequencer {
+    const call = <R>(fn: (s: Sequencer) => R | Promise<R>): Promise<R> =>
+      runInDurableObject(stub, (s: Sequencer) => fn(s));
+    return {
+      scanStart: (id, mode) => call((s) => s.scanStart(id, mode, listOrder)),
+      scanState: (id) => call((s) => s.scanState(id)),
+      scanPage: (req) => call((s) => s.scanPage(req)),
+      scanObserve: (id, page, observations) => call((s) => s.scanObserve(id, page, observations)),
+      scanConfirm: (id, limit) => call((s) => s.scanConfirm(id, limit)),
+      scanFinish: (id) => call((s) => s.scanFinish(id)),
+    };
+  }
+
+  /**
+   * Keys that are prefixes of others, continued below and above ':', which real R2 lists out of
+   * UTF-8 order: `obj-1` after `obj-1 x`, `obj-1/a`, `obj-10`, `obj-11`, and before `obj-1:x`.
+   */
+  async function seedPrefixes(stub: DurableObjectStub<Sequencer>): Promise<string[]> {
+    const etags = new Map<string, string>();
+    for (const key of ['obj-1', 'obj-1 x', 'obj-10', 'obj-1:x', 'obj-1/a', 'obj-2']) {
+      etags.set(key, await put(key, `${key} body`));
+    }
+    const logged = ['obj-1', 'obj-1 x', 'obj-10', 'obj-1:x'].map((key, i) => ({
+      eventId: `logged-${String(i)}`,
+      entry: objectEvent(0, {
+        key,
+        etag: etags.get(key) ?? '',
+        size: key.length + 5,
+        eventTime: OLD,
+      }),
+    }));
+    await stub.append([
+      ...logged,
+      {
+        eventId: 'p-2',
+        entry: objectEvent(0, { key: 'obj-2', etag: '0'.repeat(32), eventTime: OLD }),
+      },
+      {
+        eventId: 'p-11',
+        entry: objectEvent(0, { key: 'obj-11', etag: 'm0', size: 1, eventTime: OLD }),
+      },
+    ]);
+    await stub.publish();
+    return ['ETAG_MISMATCH obj-2', 'MISSING_OBJECT obj-11', 'UNLOGGED_OBJECT obj-1/a'];
+  }
+
+  it('audits a bucket of prefix keys at every page size, with the same findings', async () => {
+    for (const pageSize of [1, 2, 3, 1000]) {
+      await reset();
+      const stub = newSequencer();
+      const expected = await seedPrefixes(stub);
+      const out = await drive(
+        PARAMS,
+        new ReplayStep(),
+        deps(stub, {
+          sequencer: inProcess(stub, 'r2'),
+          bucket: realR2Listing(env.MONITORED),
+          pageSize,
+        }).d,
+      );
+      const what = `page size ${String(pageSize)}`;
+      expect(out, what).toMatchObject({ status: 'done', objectsScanned: 6 });
+      expect(findingLabels(await logLabels()), what).toEqual(expected);
+    }
+  });
+
+  it('backfills in R2 order, after which an audit finds the object logged', async () => {
+    const stub = newSequencer();
+    await seedPrefixes(stub);
+    const fill = { scanId: 'fill-t', mode: 'backfill', part: 0 } as const;
+    const d = deps(stub, {
+      sequencer: inProcess(stub, 'r2'),
+      bucket: realR2Listing(env.MONITORED),
+    }).d;
+    expect(await drive(fill, new ReplayStep(), d)).toMatchObject({ objectsScanned: 6 });
+    await stub.publish();
+    expect((await logLabels()).filter((l) => l.startsWith('object.snapshot'))).toEqual([
+      'object.snapshot obj-1/a',
+    ]);
+    expect((await drive(PARAMS, new ReplayStep(), d)).findings).toBe(2);
+  });
+
+  it('stops, without findings, when LIST_ORDER does not match the bucket', async () => {
+    const stub = newSequencer();
+    await seedPrefixes(stub);
+    const d = deps(stub, {
+      sequencer: inProcess(stub, 'utf8'),
+      bucket: realR2Listing(env.MONITORED),
+    }).d;
+    await expect(drive(PARAMS, new ReplayStep(), d)).rejects.toThrow(/utf8 list order.*LIST_ORDER/);
+    expect(findingLabels(await logLabels())).toEqual([]);
+  });
+
+  it('stops, without findings, on keys real R2 orders by data the auditor cannot see', async () => {
+    for (const pageSize of [1, 2, 1000]) {
+      await reset();
+      const stub = newSequencer();
+      await put('c', 'c');
+      await put('c:0', 'c:0'); // R2 lists it before `c` (r2-emulation.test.ts)
+      const d = deps(stub, {
+        sequencer: inProcess(stub, 'r2'),
+        bucket: realR2Listing(env.MONITORED),
+        pageSize,
+      }).d;
+      await expect(
+        drive(PARAMS, new ReplayStep(), d),
+        `page size ${String(pageSize)}`,
+      ).rejects.toThrow(/r2 list order/);
+      expect(findingLabels(await logLabels())).toEqual([]);
+    }
   });
 });

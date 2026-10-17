@@ -33,6 +33,7 @@ const CONFIG_KEYS = [
   'AUDIT_GRACE_SECONDS',
   'DEEP_SCRUB_SAMPLE_RATE',
   'DEEP_SCRUB_MAX_BYTES',
+  'LIST_ORDER',
   'PUBLIC_LOG',
   'ALERT_WEBHOOK_URL',
   'WITNESSES',
@@ -101,6 +102,8 @@ process.on('exit', () => {
 export async function startDev(o: DevOptions): Promise<DevServer> {
   return start({
     ...o,
+    // Local R2 lists keys in UTF-8 order, not in real R2's (DECISIONS D9.1).
+    vars: { LIST_ORDER: 'utf8', ...o.vars },
     name: 'dev',
     configs: ['worker/dev/wrangler.simulator.jsonc', 'worker/wrangler.jsonc'],
     ready: async (base) => {

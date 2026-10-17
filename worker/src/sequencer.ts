@@ -19,6 +19,7 @@ import {
   type ScanSummary,
   type ScrubObservation,
 } from './audit/store.ts';
+import { LIST_ORDERS, type ListOrderName } from './audit/order.ts';
 import { blindingState, loadBlinder } from './blinding.ts';
 import { parseConfig, type Config } from './config.ts';
 import { publish, putImmutable, type PublishResult } from './publish.ts';
@@ -396,6 +397,7 @@ export class Sequencer extends DurableObject<Env> {
       ttlMs: this.#config.dedupeTtlSeconds * 1000,
       bucket: this.#config.monitoredBucket,
       names,
+      listOrder: this.#config.listOrder,
     };
   }
 
@@ -413,14 +415,24 @@ export class Sequencer extends DurableObject<Env> {
     }
   }
 
-  async scanStart(scanId: string, mode: ScanMode): Promise<Outcome<{ scan: ScanSummary }>> {
+  /**
+   * `listOrder` overrides LIST_ORDER for this scan: tests use it to run real R2's order against an
+   * emulation of it, which local R2 does not list in.
+   */
+  async scanStart(
+    scanId: string,
+    mode: ScanMode,
+    listOrder?: ListOrderName,
+  ): Promise<Outcome<{ scan: ScanSummary }>> {
+    if (listOrder !== undefined && !LIST_ORDERS.includes(listOrder)) {
+      throw new RangeError('unknown list order');
+    }
     await this.#flush();
-    const r = this.#audit.start(
-      scanId,
-      mode,
-      this.#config.auditGraceSeconds,
-      await this.#scanContext(),
-    );
+    const ctx = await this.#scanContext();
+    const r = this.#audit.start(scanId, mode, this.#config.auditGraceSeconds, {
+      ...ctx,
+      listOrder: listOrder ?? ctx.listOrder,
+    });
     await this.#scheduleAlarm(false);
     return r;
   }

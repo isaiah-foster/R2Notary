@@ -12,9 +12,13 @@ const bucket = (): R2Bucket => (env as unknown as { CONTRACT: R2Bucket }).CONTRA
 const prefix = `r2notary-probe/${String(Date.now())}/`;
 
 // The contract's keys, plus `c` and `c` followed by one character from across the ranges, to place
-// the end of a key relative to the bytes that can follow it.
+// the end of a key relative to the bytes that can follow it; then keys continuing `c:` and `c9`,
+// to tell "a key ends in `:`" from "a key ends in `:` and something more".
 const NEXT = [' ', '!', '%', '/', '0', '9', ':', 'A', 'Z', '_', 'a', 'x', '~', '\u007f', 'é', ''];
-const KEYS = [...ORDER_KEYS, 'c', ...NEXT.map((ch) => `c${ch}`)];
+const AFTER_COLON = ['c:0', 'c:9', 'c::', 'c:A', 'c;', 'c9z'];
+const KEYS = [...ORDER_KEYS, 'c', ...NEXT.map((ch) => `c${ch}`), ...AFTER_COLON];
+/** The start the auditor would pass to list the keys after `key` (D9.1). */
+const pastEnd = (key: string): string => `${key}9\u{10FFFF}`;
 
 /** Code points as hex, so the output is unambiguous whatever the terminal renders. */
 const show = (key: string): string =>
@@ -60,11 +64,17 @@ it('probe R2 list order and startAfter', { timeout: 300_000 }, async () => {
     from = next;
   }
   const after: Record<string, string[] | string> = {};
+  const afterPastEnd: Record<string, string[] | string> = {};
   for (const k of utf8) {
-    try {
-      after[show(k)] = (await list({ startAfter: k, limit: 1000 })).map(show);
-    } catch (e) {
-      after[show(k)] = errorText(e);
+    for (const [out, start] of [
+      [after, k],
+      [afterPastEnd, pastEnd(k)],
+    ] as const) {
+      try {
+        out[show(k)] = (await list({ startAfter: start, limit: 1000 })).map(show);
+      } catch (e) {
+        out[show(k)] = errorText(e);
+      }
     }
   }
 
@@ -76,6 +86,7 @@ it('probe R2 list order and startAfter', { timeout: 300_000 }, async () => {
         listOrder: listed.map(show),
         startAfterChainLimit1: steps,
         startAfterEachKey: after,
+        startAfterPastEnd: afterPastEnd,
       },
       null,
       1,

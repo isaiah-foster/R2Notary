@@ -2,22 +2,20 @@
 // log's expected state (the Sequencer's `objects` view). Pure and synchronous; the Sequencer runs
 // it inside the transaction that records its result.
 //
-// Both inputs are sorted in UTF-8 byte order: R2 list() is lexicographic by key bytes, and so is
-// SQLite's BINARY collation (DECISIONS D6.2). JavaScript's `<` is not, so every comparison here
-// goes through compareUtf8, and out-of-order input is rejected rather than merged wrongly.
+// Both inputs are sorted in the scan's list order (order.ts): UTF-8 byte order for local R2, and
+// the order real R2 lists keys in, which differs from it for keys that are prefixes of others
+// (DECISIONS D6.2, D9.1). The Sequencer reads its rows in the same order. JavaScript's `<` is
+// neither, so every comparison here goes through `order.compare`, and out-of-order input is
+// rejected rather than merged wrongly.
 //
 // A page covers the keys in (after, end]. Each side is read with a limit, so `end` is the smaller
 // of the two last keys of whichever sides were truncated: past that point one side has not been
 // read yet, and merging there would report false MISSING or UNLOGGED objects. `end` null means
 // both sides are exhausted and the scan's listing is complete.
 
-import {
-  compareUtf8,
-  type ExpectedState,
-  type FindingKind,
-  type ObservedState,
-} from '@r2notary/core';
+import type { ExpectedState, FindingKind, ObservedState } from '@r2notary/core';
 import { eventMillis, type ObjectState } from '../store.ts';
+import type { ListOrder } from './order.ts';
 
 /** One object from the bucket listing. `uploaded` is epoch milliseconds (R2Object.uploaded). */
 export interface ListedObject {
@@ -45,16 +43,17 @@ export interface Candidate {
 export interface PageInput {
   /** Exclusive lower bound of the page (the previous page's end); null for the first page. */
   readonly after: string | null;
-  /** Listed objects with key > after, in UTF-8 order. */
+  /** Listed objects with key > after, in `order`. */
   readonly listed: readonly ListedObject[];
   readonly listTruncated: boolean;
-  /** Live (not deleted) rows of the objects view with key > after, in UTF-8 order. */
+  /** Live (not deleted) rows of the objects view with key > after, in `order`. */
   readonly live: readonly ObjectState[];
   readonly liveTruncated: boolean;
   /** The objects-view row, live or deleted, for listed keys that have one. */
   readonly rows: ReadonlyMap<string, ObjectState>;
   readonly now: number;
   readonly graceMs: number;
+  readonly order: ListOrder;
 }
 
 export interface PageResult {
@@ -69,13 +68,20 @@ export class ReconcileError extends Error {
   override name = 'ReconcileError';
 }
 
-/** Throws unless the keys are strictly increasing in UTF-8 order and all after `after`. */
-export function checkOrder(keys: readonly string[], after: string | null, what: string): void {
+/** Throws unless the keys are strictly increasing in `order` and all after `after`. */
+export function checkOrder(
+  keys: readonly string[],
+  after: string | null,
+  what: string,
+  order: ListOrder,
+): void {
   let prev = after;
   for (const k of keys) {
-    if (prev !== null && compareUtf8(k, prev) <= 0) {
+    if (prev !== null && order.compare(k, prev) <= 0) {
+      // A wrong LIST_ORDER, or keys real R2 lists out of any order the auditor can compare (D9.1).
       throw new ReconcileError(
-        `${what} is not strictly increasing in UTF-8 order after the cursor`,
+        `${what} is not strictly increasing in ${order.name} list order after the cursor` +
+          ' (LIST_ORDER; DECISIONS D9.1)',
       );
     }
     prev = k;
@@ -88,6 +94,7 @@ export function pageEnd(
   listTruncated: boolean,
   live: readonly { key: string }[],
   liveTruncated: boolean,
+  order: ListOrder,
 ): string | null {
   const ends: string[] = [];
   for (const [side, truncated, what] of [
@@ -101,7 +108,7 @@ export function pageEnd(
     ends.push(last.key);
   }
   if (ends.length === 0) return null;
-  return ends.reduce((a, b) => (compareUtf8(a, b) <= 0 ? a : b));
+  return ends.reduce((a, b) => (order.compare(a, b) <= 0 ? a : b));
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -149,15 +156,17 @@ export function reconcilePage(p: PageInput): PageResult {
     p.listed.map((o) => o.key),
     p.after,
     'listing',
+    p.order,
   );
   checkOrder(
     p.live.map((r) => r.key),
     p.after,
     'live rows',
+    p.order,
   );
   if (p.live.some((r) => r.deleted)) throw new ReconcileError('live rows include a deleted row');
-  const end = pageEnd(p.listed, p.listTruncated, p.live, p.liveTruncated);
-  const inPage = (k: string): boolean => end === null || compareUtf8(k, end) <= 0;
+  const end = pageEnd(p.listed, p.listTruncated, p.live, p.liveTruncated, p.order);
+  const inPage = (k: string): boolean => end === null || p.order.compare(k, end) <= 0;
   const quiet = (ms: number): boolean => ms <= p.now - p.graceMs;
 
   // Merge the two sorted streams so candidates come out in key order.
@@ -169,7 +178,7 @@ export function reconcilePage(p: PageInput): PageResult {
   while (i < listed.length || j < live.length) {
     const o = listed[i];
     const r = live[j];
-    const c = o === undefined ? 1 : r === undefined ? -1 : compareUtf8(o.key, r.key);
+    const c = o === undefined ? 1 : r === undefined ? -1 : p.order.compare(o.key, r.key);
     let found: Candidate | null = null;
     if (c > 0 && r !== undefined) {
       // Live in the log, not in the bucket.

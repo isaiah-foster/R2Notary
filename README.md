@@ -7,9 +7,10 @@ independently verifiable by a Go CLI.
 > **Status.** Milestones M0-M7 of `PLAN.md` are implemented and tested **locally**, and of the M8
 > stretch items the browser verifier, witness cosigning and key blinding (gateway mode and
 > multi-bucket state are deferred, `docs/DECISIONS.md` D8.10-D8.11). The only thing run on
-> Cloudflare's network so far is the R2 contract tests (2026-10-17, D9.1): conditional writes pass,
-> and list order fails when one key is a prefix of another (`obj-1` and `obj-10`), which stops the
-> auditor on such a bucket (it fails closed). No deployment and no real R2 event notifications yet,
+> Cloudflare's network so far is the R2 contract tests (2026-10-17): both pass. Real R2 turned out
+> not to list keys in UTF-8 order when one is a prefix of another (`obj-1` after `obj-10`), and the
+> auditor now follows R2's order (`LIST_ORDER`, D9.1-D9.2). No deployment and no real R2 event
+> notifications yet,
 > and every benchmark figure is from a local simulation (see "Measured, locally" below). Those steps
 > need a Cloudflare account and the owner's approval; they are written up in `docs/OPERATIONS.md`
 > and `docs/DEMO.md`.
@@ -70,8 +71,9 @@ place where the current Cloudflare docs differed from the plan: `docs/DECISIONS.
   Blinding hides names, not how often an object changes, its size, its times, or its ETag (an MD5 of
   the content for single-part uploads).
 - One sequencer per log is a throughput ceiling (measured locally, below; not on Cloudflare).
-- Audits need a bucket where no key is a prefix of another: real R2 lists `obj-1` after `obj-10`,
-  and the auditor stops rather than merge a listing out of UTF-8 order (`docs/DECISIONS.md` D9.1).
+- An audit stops (without findings) on a bucket holding a key `k` and `k:` followed by a byte up to
+  `9` (`c` and `c:0`): real R2 orders those by data `list()` does not return (`docs/DECISIONS.md`
+  D9.2). Every other key order, prefixes included, is followed.
 - Not an S3 proxy (nothing sits on the bucket's data path), and not a replacement for R2 bucket
   locks, which it complements.
 
@@ -92,6 +94,7 @@ npm ci
 # wait five minutes.
 npm run keygen -- --origin r2notary.example.com/log/example-log --out worker/.dev.vars
 echo 'AUDIT_GRACE_SECONDS=0' >> worker/.dev.vars
+echo 'LIST_ORDER=utf8' >> worker/.dev.vars          # local R2 lists in UTF-8 order, real R2 does not
 
 npm run dev:sim     # terminal 1: Worker, Sequencer, queue, Workflow, simulator on :8787
 ```

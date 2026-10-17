@@ -1,6 +1,7 @@
 // Configuration. Vars arrive from wrangler as strings; they are parsed and validated once, so a bad
 // deployment fails at startup instead of on the first event.
 
+import { LIST_ORDERS, type ListOrderName } from './audit/order.ts';
 import {
   SIG_TYPE_COSIGNATURE_V1,
   fromBase64,
@@ -30,6 +31,11 @@ export interface Config {
   readonly deepScrubSampleRate: number;
   /** Objects larger than this are never deep-scrubbed. */
   readonly deepScrubMaxBytes: number;
+  /**
+   * How the monitored bucket lists keys (audit/order.ts, DECISIONS D9.1): `r2` for real R2, `utf8`
+   * for local R2 under wrangler dev. A wrong value makes audits stop, not report false findings.
+   */
+  readonly listOrder: ListOrderName;
   /** Witnesses asked to cosign each checkpoint (C2SP tlog-witness, M8); empty: none. */
   readonly witnesses: readonly WitnessEndpoint[];
   /** Cosignatures a checkpoint needs before it is published (0: best effort). */
@@ -60,6 +66,7 @@ type ConfigVars = Record<
   | 'AUDIT_GRACE_SECONDS'
   | 'DEEP_SCRUB_SAMPLE_RATE'
   | 'DEEP_SCRUB_MAX_BYTES'
+  | 'LIST_ORDER'
   | 'WITNESSES'
   | 'WITNESS_QUORUM'
   | 'KEY_BLINDING',
@@ -175,6 +182,10 @@ export function parseConfig(vars: ConfigVars): Config {
     throw new ConfigError('EVENTS_DLQ_NAME must be 1-63 of [A-Za-z0-9_-]');
   }
   const witnesses = parseWitnesses(vars.WITNESSES);
+  const listOrder = LIST_ORDERS.find((o) => o === vars.LIST_ORDER);
+  if (listOrder === undefined) {
+    throw new ConfigError('LIST_ORDER must be "r2" (real R2) or "utf8" (local R2)');
+  }
   return {
     logName: vars.LOG_NAME,
     logOrigin: vars.LOG_ORIGIN,
@@ -194,6 +205,7 @@ export function parseConfig(vars: ConfigVars): Config {
     auditGraceSeconds: int('AUDIT_GRACE_SECONDS', vars.AUDIT_GRACE_SECONDS, 0, 86_400),
     deepScrubSampleRate: fraction('DEEP_SCRUB_SAMPLE_RATE', vars.DEEP_SCRUB_SAMPLE_RATE),
     deepScrubMaxBytes: int('DEEP_SCRUB_MAX_BYTES', vars.DEEP_SCRUB_MAX_BYTES, 0, 2 ** 40),
+    listOrder,
     witnesses,
     witnessQuorum: int('WITNESS_QUORUM', vars.WITNESS_QUORUM, 0, witnesses.length),
     keyBlinding: bool('KEY_BLINDING', vars.KEY_BLINDING),

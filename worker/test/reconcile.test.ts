@@ -1,8 +1,9 @@
 // The auditor's merge-join (PLAN §5.6): one page of the bucket listing against the log's expected
-// state. Pure; every finding kind, the grace window, page boundaries and Unicode key order.
-import { compareUtf8 } from '@r2notary/core';
+// state. Pure; every finding kind, the grace window, page boundaries, Unicode key order, and real
+// R2's list order (D9.1).
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
+import { R2_ORDER, UTF8_ORDER, type ListOrder } from '../src/audit/order.ts';
 import {
   ReconcileError,
   reconcilePage,
@@ -46,6 +47,7 @@ function single(listed: ListedObject[], rows: ObjectState[], now = NOW): Candida
     rows: new Map(rows.map((r) => [r.key, r])),
     now,
     graceMs: GRACE,
+    order: UTF8_ORDER,
   }).candidates;
 }
 
@@ -170,6 +172,7 @@ describe('grace window', () => {
       rows: new Map(),
       now: NOW,
       graceMs: 0,
+      order: UTF8_ORDER,
     });
     expect(r.candidates).toHaveLength(1);
   });
@@ -192,6 +195,7 @@ describe('pages', () => {
     rows: new Map(),
     now: NOW,
     graceMs: GRACE,
+    order: UTF8_ORDER,
     ...o,
   });
 
@@ -261,102 +265,152 @@ describe('pages', () => {
       expect(() => reconcilePage(base(o)), what).toThrow(ReconcileError);
     }
   });
-});
 
-describe('merge-join under any pagination (property)', () => {
-  // Each key is in the bucket or not, and in the log as live, deleted, or absent; states are
-  // drawn so that every kind occurs. The paginated result must equal an oracle that classifies
-  // each key on its own, whatever page sizes the bucket and the log are read with.
-  const KEYS = ['a', 'b', 'é', '', '�', '\u{10000}', '\u{1F600}', 'z', 'zz', '~'];
-  const state = fc.record({
-    inBucket: fc.boolean(),
-    log: fc.constantFrom('none', 'live', 'deleted'),
-    etag: fc.constantFrom('e1', 'e2'),
-    size: fc.constantFrom(10, 11),
-    old: fc.boolean(), // outside the grace window
-  });
-
-  function oracle(bucket: Map<string, ListedObject>, rows: Map<string, ObjectState>): string[] {
-    const out: string[] = [];
-    const keys = [...new Set([...bucket.keys(), ...rows.keys()])].sort(compareUtf8);
-    const quiet = (ms: number): boolean => ms <= NOW - GRACE;
-    for (const k of keys) {
-      const o = bucket.get(k);
-      const r = rows.get(k);
-      if (o && !r && quiet(o.uploaded)) out.push(`UNLOGGED_OBJECT ${k}`);
-      if (!o && r && !r.deleted && quiet(eventMillis(r.eventTime))) out.push(`MISSING_OBJECT ${k}`);
-      if (o && r && quiet(Math.max(o.uploaded, eventMillis(r.eventTime)))) {
-        if (r.deleted) out.push(`PHANTOM_DELETE ${k}`);
-        else if (r.etag !== null && r.etag !== o.etag) out.push(`ETAG_MISMATCH ${k}`);
-        else if (r.size !== null && r.size !== o.size) out.push(`SIZE_MISMATCH ${k}`);
-      }
-    }
-    return out;
-  }
-
-  it('equals the per-key oracle', () => {
-    fc.assert(
-      fc.property(
-        fc.array(state, { minLength: KEYS.length, maxLength: KEYS.length }),
-        fc.integer({ min: 1, max: 4 }),
-        fc.integer({ min: 1, max: 4 }),
-        (states, listLimit, liveLimit) => {
-          const bucket = new Map<string, ListedObject>();
-          const rows = new Map<string, ObjectState>();
-          states.forEach((s, i) => {
-            const key = KEYS[i] ?? '';
-            const t = s.old ? T0 : NOW;
-            if (s.inBucket) bucket.set(key, obj(key, { uploaded: t }));
-            if (s.log !== 'none') {
-              rows.set(
-                key,
-                row(key, {
-                  etag: s.etag,
-                  size: s.size,
-                  eventTime: iso(t),
-                  deleted: s.log === 'deleted',
-                  seq: i,
-                }),
-              );
-            }
-          });
-          const sortedBucket = [...bucket.values()].sort((x, y) => compareUtf8(x.key, y.key));
-          const sortedLive = [...rows.values()]
-            .filter((r) => !r.deleted)
-            .sort((x, y) => compareUtf8(x.key, y.key));
-          const found: string[] = [];
-          let scanned = 0;
-          let after: string | null = null;
-          for (let pages = 0; ; pages++) {
-            expect(pages).toBeLessThan(50);
-            const gt = (k: string): boolean => after === null || compareUtf8(k, after) > 0;
-            const listedAll = sortedBucket.filter((o) => gt(o.key));
-            const liveAll = sortedLive.filter((r) => gt(r.key));
-            const listed = listedAll.slice(0, listLimit);
-            const r = reconcilePage({
-              after,
-              listed,
-              listTruncated: listedAll.length > listLimit,
-              live: liveAll.slice(0, liveLimit),
-              liveTruncated: liveAll.length > liveLimit,
-              rows: new Map(
-                listed.flatMap((o) =>
-                  rows.has(o.key) ? [[o.key, rows.get(o.key) as ObjectState]] : [],
-                ),
-              ),
-              now: NOW,
-              graceMs: GRACE,
-            });
-            found.push(...r.candidates.map((c) => `${c.kind} ${c.key}`));
-            scanned += r.scanned;
-            if (r.end === null) break;
-            after = r.end;
-          }
-          expect(found).toEqual(oracle(bucket, rows));
-          expect(scanned).toBe(bucket.size); // every object counted exactly once
-        },
-      ),
-      { numRuns: 500 },
+  it('merges in real R2 order, where a key comes after keys continuing it up to "9"', () => {
+    // As real R2 lists them (D9.1): `a` after `a b`, `a/b`, `a0`, and before `a:` and `aA`.
+    const listed = ['a b', 'a/b', 'a0', 'a', 'a:', 'aA'].map((k) => obj(k));
+    const r = reconcilePage(
+      base({
+        order: R2_ORDER,
+        listed,
+        listTruncated: true,
+        live: [row('a/b'), row('a'), row('a:')],
+        liveTruncated: true,
+        rows: new Map([
+          ['a/b', row('a/b')],
+          ['a', row('a')],
+          ['a:', row('a:')],
+        ]),
+      }),
+    );
+    expect(r.end).toBe('a:');
+    expect(r.scanned).toBe(5); // aA is listed again by the next page
+    expect(r.candidates.map((c) => `${c.kind} ${c.key}`)).toEqual([
+      'UNLOGGED_OBJECT a b',
+      'UNLOGGED_OBJECT a0',
+    ]);
+    // The same listing is out of UTF-8 order, and the reverse: each order refuses the other.
+    expect(() => reconcilePage(base({ listed }))).toThrow(/utf8 list order.*LIST_ORDER/);
+    expect(() => reconcilePage(base({ order: R2_ORDER, listed: [obj('a'), obj('a0')] }))).toThrow(
+      /r2 list order.*LIST_ORDER/,
     );
   });
 });
+
+describe.each([UTF8_ORDER, R2_ORDER])(
+  'merge-join under any pagination ($name order, property)',
+  (order: ListOrder) => {
+    // Each key is in the bucket or not, and in the log as live, deleted, or absent; states are
+    // drawn so that every kind occurs. The paginated result must equal an oracle that classifies
+    // each key on its own, whatever page sizes the bucket and the log are read with. The keys
+    // include prefixes of others, continued below and above ':' (where the two orders differ).
+    const KEYS = [
+      'a',
+      'b',
+      'é',
+      '',
+      '�',
+      '\u{10000}',
+      '\u{1F600}',
+      'z',
+      'zz',
+      '~',
+      'z0',
+      'z/',
+      'z:',
+    ];
+    const state = fc.record({
+      inBucket: fc.boolean(),
+      log: fc.constantFrom('none', 'live', 'deleted'),
+      etag: fc.constantFrom('e1', 'e2'),
+      size: fc.constantFrom(10, 11),
+      old: fc.boolean(), // outside the grace window
+    });
+
+    function oracle(bucket: Map<string, ListedObject>, rows: Map<string, ObjectState>): string[] {
+      const out: string[] = [];
+      const keys = [...new Set([...bucket.keys(), ...rows.keys()])].sort(order.compare);
+      const quiet = (ms: number): boolean => ms <= NOW - GRACE;
+      for (const k of keys) {
+        const o = bucket.get(k);
+        const r = rows.get(k);
+        if (o && !r && quiet(o.uploaded)) out.push(`UNLOGGED_OBJECT ${k}`);
+        if (!o && r && !r.deleted && quiet(eventMillis(r.eventTime)))
+          out.push(`MISSING_OBJECT ${k}`);
+        if (o && r && quiet(Math.max(o.uploaded, eventMillis(r.eventTime)))) {
+          if (r.deleted) out.push(`PHANTOM_DELETE ${k}`);
+          else if (r.etag !== null && r.etag !== o.etag) out.push(`ETAG_MISMATCH ${k}`);
+          else if (r.size !== null && r.size !== o.size) out.push(`SIZE_MISMATCH ${k}`);
+        }
+      }
+      return out;
+    }
+
+    it('equals the per-key oracle', () => {
+      fc.assert(
+        fc.property(
+          fc.array(state, { minLength: KEYS.length, maxLength: KEYS.length }),
+          fc.integer({ min: 1, max: 4 }),
+          fc.integer({ min: 1, max: 4 }),
+          (states, listLimit, liveLimit) => {
+            const bucket = new Map<string, ListedObject>();
+            const rows = new Map<string, ObjectState>();
+            states.forEach((s, i) => {
+              const key = KEYS[i] ?? '';
+              const t = s.old ? T0 : NOW;
+              if (s.inBucket) bucket.set(key, obj(key, { uploaded: t }));
+              if (s.log !== 'none') {
+                rows.set(
+                  key,
+                  row(key, {
+                    etag: s.etag,
+                    size: s.size,
+                    eventTime: iso(t),
+                    deleted: s.log === 'deleted',
+                    seq: i,
+                  }),
+                );
+              }
+            });
+            const sortedBucket = [...bucket.values()].sort((x, y) => order.compare(x.key, y.key));
+            const sortedLive = [...rows.values()]
+              .filter((r) => !r.deleted)
+              .sort((x, y) => order.compare(x.key, y.key));
+            const found: string[] = [];
+            let scanned = 0;
+            let after: string | null = null;
+            for (let pages = 0; ; pages++) {
+              expect(pages).toBeLessThan(50);
+              const gt = (k: string): boolean => after === null || order.compare(k, after) > 0;
+              const listedAll = sortedBucket.filter((o) => gt(o.key));
+              const liveAll = sortedLive.filter((r) => gt(r.key));
+              const listed = listedAll.slice(0, listLimit);
+              const r = reconcilePage({
+                after,
+                listed,
+                listTruncated: listedAll.length > listLimit,
+                live: liveAll.slice(0, liveLimit),
+                liveTruncated: liveAll.length > liveLimit,
+                rows: new Map(
+                  listed.flatMap((o) =>
+                    rows.has(o.key) ? [[o.key, rows.get(o.key) as ObjectState]] : [],
+                  ),
+                ),
+                now: NOW,
+                graceMs: GRACE,
+                order,
+              });
+              found.push(...r.candidates.map((c) => `${c.kind} ${c.key}`));
+              scanned += r.scanned;
+              if (r.end === null) break;
+              after = r.end;
+            }
+            expect(found).toEqual(oracle(bucket, rows));
+            expect(scanned).toBe(bucket.size); // every object counted exactly once
+          },
+        ),
+        { numRuns: 500 },
+      );
+    });
+  },
+);

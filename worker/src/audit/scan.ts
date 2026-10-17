@@ -13,10 +13,10 @@
 // Flow: start -> page-0..n (+ scrub-i) -> confirm-0..m (sleeping out the grace window) -> finish
 // -> alert (optional).
 
-import { compareUtf8 } from '@r2notary/core';
 import { NonRetryableError } from 'cloudflare:workflows';
 import type { Sequencer } from '../sequencer.ts';
 import type { AlertSummary } from './alert.ts';
+import { listAfter, listOrder } from './order.ts';
 import type { ListedObject } from './reconcile.ts';
 import { MAX_SCRUB_PER_PAGE, scrubObject, selectForScrub, type ScrubTarget } from './scrub.ts';
 import {
@@ -190,6 +190,8 @@ export async function runScan(p: ScanParams, step: StepLike, d: ScanDeps): Promi
   let state: ScanState = begun.scan.state;
   let after = begun.scan.cursor;
   let page = begun.scan.pages;
+  // The order the scan started with, whatever LIST_ORDER is now: its pages must not mix two.
+  const order = listOrder(begun.scan.listOrder);
 
   const handOff = async (): Promise<ScanOutcome> => {
     const next = { ...p, part: p.part + 1 };
@@ -212,10 +214,7 @@ export async function runScan(p: ScanParams, step: StepLike, d: ScanDeps): Promi
     const n = page;
     const from = after;
     const r = await run(`page-${String(n)}`, 2, async () => {
-      const listing = await d.bucket.list({
-        limit: d.pageSize,
-        ...(from === null ? {} : { startAfter: from }),
-      });
+      const listing = await listAfter(d.bucket, order, from, d.pageSize);
       const listed = listing.objects.map(toListed);
       const res = await d.sequencer.scanPage({
         scanId: p.scanId,
@@ -226,7 +225,7 @@ export async function runScan(p: ScanParams, step: StepLike, d: ScanDeps): Promi
         liveLimit: d.pageSize,
       });
       if (!res.ok) return { ...res, scrub: [] as ScrubTarget[] };
-      const covered = listed.filter((o) => res.end === null || compareUtf8(o.key, res.end) <= 0);
+      const covered = listed.filter((o) => res.end === null || order.compare(o.key, res.end) <= 0);
       const scrub = scrubbing
         ? await selectForScrub(p.scanId, covered, d.scrubRate, d.scrubMaxBytes)
         : [];
