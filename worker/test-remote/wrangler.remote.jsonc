@@ -1,6 +1,7 @@
 // Config for the R2 contract test against REAL R2 (docs/OPERATIONS.md). Not used by `npm test`.
-// Replace the placeholder with a dedicated, empty test bucket before running. Running it performs
-// real R2 operations on that bucket and is billed as usual.
+// The bucket stays a placeholder here: put a dedicated, empty test bucket in `contractBucket` of
+// worker/deploy.local.json (gitignored; scripts/lib/local-config.ts), and vitest.remote.config.ts
+// runs a copy with it. Running it performs real R2 operations on that bucket and is billed as usual.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "r2notary-contract",

@@ -1,10 +1,12 @@
 # Operations
 
-Commands that touch real Cloudflare resources. **None of these have been run yet.** Each one
+Commands that touch real Cloudflare resources. **Only §2 (the R2 contract tests) has run (2026-10-17).** Each one
 creates, modifies or bills for something in a Cloudflare account, so the repository owner runs or
 approves them (PLAN §0, working agreement 4). Flags were checked against `wrangler` 4.147.0
 `--help` and the Cloudflare docs on 2026-10-02/03. Bucket, queue and host names are the committed
-placeholders; use your own and keep them out of commits.
+placeholders; use your own and keep them out of commits: the committed configs keep the placeholders
+(a test checks it), and your values go in `worker/deploy.local.json`, which is gitignored and
+survives `git reset --hard` (DECISIONS D9.3; format in `scripts/lib/local-config.ts`).
 
 Order for a first deployment: §1 resources → §2 contract tests → §3 secrets (decide on key
 blinding here, §12: it cannot change once the log has entries) → §4 deploy → §5 backfill and first
@@ -34,10 +36,12 @@ month base; usage pricing in §10).
    Never create a rule on the log bucket: the consumer drops such events (I8), but each one still
    costs a queue message. R2 rejects overlapping rules and allows at most 100 per bucket.
 
-Put the real bucket names in `worker/wrangler.jsonc` (`r2_buckets`, `MONITORED_BUCKET_NAME`,
-`LOG_BUCKET_NAME`) and the real origin in `LOG_ORIGIN` (`<host>/log/<LOG_NAME>`, no scheme, no
-trailing slash). The origin is signed into every checkpoint and cannot change later without starting
-a new log (D4.1).
+Put the real bucket names and origin in `worker/deploy.local.json`, under `vars`:
+`MONITORED_BUCKET_NAME`, `LOG_BUCKET_NAME` (the bucket bindings follow them) and `LOG_ORIGIN`
+(`<host>/log/<LOG_NAME>`, no scheme, no trailing slash). `npm run deploy` refuses to run without all
+three. The origin is signed into every checkpoint and cannot change later without starting a new log
+(D4.1). Do not edit the names in `worker/wrangler.jsonc`: the dev simulator and the harnesses use
+the placeholders there, and a real name there leaves `npm run dev:sim` logging nothing.
 
 After the first real events arrive, check them against DECISIONS D3.7 (key encoding, ETag quoting,
 field set) and record the result there. **If R2 URL-encodes keys in notifications, stop before
@@ -58,7 +62,8 @@ Counted from the test code, the run issues 66 PUTs (some deliberately rejected),
 empty bucket.
 
 1. Create a test bucket: `npx wrangler r2 bucket create r2notary-contract-test`
-2. Put that name in `worker/test-remote/wrangler.remote.jsonc` (`bucket_name`). Do not commit it.
+2. Put that name in `contractBucket` in `worker/deploy.local.json`. The harness runs a gitignored
+   copy of `worker/test-remote/wrangler.remote.jsonc` with it.
 3. Run: `npm run test:contract:remote`
 4. Record the result (date, wrangler version, pass/fail per case) in `docs/DECISIONS.md` D2.1
    and D6.2.
@@ -88,8 +93,8 @@ Generate them locally, then put each one. The values never go in the repository.
    `npx wrangler secret put <NAME> -c worker/wrangler.jsonc` and paste the value.
    `READ_TOKEN` is only used when `PUBLIC_LOG` is `"false"` (the committed default).
    Optional: `ALERT_WEBHOOK_URL` (https only; receives counts and log indexes, never key names).
-   Key blinding (§12): generate with `--blind`, set `KEY_BLINDING` to `"true"` in
-   `worker/wrangler.jsonc`, and put `KEY_BLINDING_KEY` before the first deploy.
+   Key blinding (§12): generate with `--blind`, set `KEY_BLINDING` to `"true"` in the `vars` of
+   `worker/deploy.local.json`, and put `KEY_BLINDING_KEY` before the first deploy.
 3. Publish the vkey (the comment line in the file) wherever clients will find it, then delete the
    file or move it to a password manager.
 
@@ -100,15 +105,19 @@ Locally, `--out worker/.dev.vars` does the same for `wrangler dev` (`.dev.vars` 
 
 ## 4. Deploy
 
-`npx wrangler deploy -c worker/wrangler.jsonc` creates or updates the Worker, the `Sequencer`
+`npm run deploy` (`-- --dry-run` first, to see the bindings) writes `worker/wrangler.deploy.jsonc`
+from `worker/wrangler.jsonc` and `worker/deploy.local.json` (both generated file and input are
+gitignored) and runs `wrangler deploy` with it. It creates or updates the Worker, the `Sequencer`
 Durable Object class (declared through `exports`, D0.3: if the deploy rejects that form, fall back to
 a `migrations` entry with `new_sqlite_classes`), the `r2notary-scan` Workflow, the queue consumers
 and the cron trigger. Never deploy `worker/dev/wrangler.simulator.jsonc`: the simulator has no
 authentication and can append to the log.
 
 Check it: `curl -s -H "Authorization: Bearer $READ_TOKEN" https://<host>/api/v1/status` shows
-`size: 0`, then grows as events arrive. With a custom domain, route `<host>/*` to the Worker so the
-log is served at `https://<host>/log/<LOG_NAME>/`, matching `LOG_ORIGIN`.
+`size: 0`, then grows as events arrive. With a custom domain, add it to `worker/deploy.local.json`
+as `"routes": [{ "pattern": "<host>", "custom_domain": true }]` so the log is served at
+`https://<host>/log/<LOG_NAME>/`, matching `LOG_ORIGIN`; `npm run deploy` refuses routes that do not
+serve the host `LOG_ORIGIN` names.
 
 A deploy restarts Durable Objects (DO lifecycle docs). The Sequencer keeps nothing in memory that is
 not in SQLite, so a restart, including one in the middle of a publication, is the crash case
@@ -251,7 +260,7 @@ party deploy `witness/`:
    `[{"origin": "r2notary.example.com/log/example-log", "vkeys": ["<log vkey>"]}]`.
 3. `npx wrangler deploy -c witness/wrangler.jsonc`. It serves `POST /add-checkpoint` and
    `GET /<sha256(origin)>/checkpoint` at the root of its URL. Not run yet.
-4. The log operator adds the witness to `WITNESSES` in `worker/wrangler.jsonc`
+4. The log operator adds the witness to `WITNESSES` in the `vars` of `worker/deploy.local.json`
    (`[{"vkey": "<witness cosigner vkey>", "url": "https://<witness host>"}]`), chooses
    `WITNESS_QUORUM`, and deploys. With a quorum, a witness outage stops new checkpoints (entries stay
    durable; `/api/v1/status` shows each witness's last error), so start with `"0"` (best effort) and

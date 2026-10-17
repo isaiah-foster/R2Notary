@@ -13,3 +13,7 @@ coverage/
 bench/tmp/
 # the Go CLI built by the README quickstart (cd cli && go build -o r2notary ./cmd/r2notary)
 cli/r2notary
+# this deployment's real names and the configs generated from them (scripts/lib/local-config.ts)
+worker/deploy.local.json
+worker/wrangler.deploy.jsonc
+worker/test-remote/wrangler.remote.local.jsonc

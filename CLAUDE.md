@@ -19,7 +19,8 @@ record reasoning in `docs/DECISIONS.md`.
    workflows, set remote secrets, push, or do anything that costs money without explicit confirmation.
    Develop against local simulation. Put remote setup commands in `docs/OPERATIONS.md` and ask the human.
 5. **No secrets in the repo.** `.dev.vars`, key files and `.wrangler/` stay gitignored. Committed config uses
-   placeholder account IDs and bucket names.
+   placeholder account IDs and bucket names (`worker/test/committed-config.test.ts` checks it); real
+   names go in the gitignored `worker/deploy.local.json`, applied by `npm run deploy` (D9.3).
 6. **Never invent numbers.** Any performance or cost figure in README/docs/commits must come from
    `bench/results/`, with methodology in `docs/BENCHMARKS.md`. If a benchmark hasn't run, say so.
 7. **Be honest about limits.** The README states what the system does _not_ protect against (PLAN §11).

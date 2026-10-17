@@ -1703,3 +1703,36 @@ single sequencer (D7.8). Revisit with a measured need.
   suffix, which `list()` does not return. The rule rests on 41 keys measured through remote
   bindings, not on documentation, and not yet from a deployed Worker. The real-R2 demo
   (`docs/DEMO.md`) uses `demo/obj-1` … `demo/obj-300` again, which exercise prefix keys.
+
+### D9.3 Real names stay out of the repository; the committed configs keep placeholders
+
+- **Found:** a commit ("name buckets", 29d3df1) put real bucket names in `worker/wrangler.jsonc`, as
+  `docs/OPERATIONS.md` §1 then told operators to do (locally, not committed). The dev simulator's
+  config (`worker/dev/wrangler.simulator.jsonc`) still named `example-monitored-bucket`, so under
+  `npm run dev:sim`, the README quickstart, conformance and the `wrangler dev` benchmarks, the
+  simulator wrote objects and notifications for a bucket r2notary did not monitor, and nothing was
+  logged. `config.test.ts` failed too. The conformance harness, `simulate-events.ts` and the
+  benchmarks also hard-code the placeholders. Separately, editing tracked files for a deployment
+  does not survive `r2notary/update.sh` on the deploy host, which runs `git reset --hard`.
+- **Decision:** the committed configs keep the placeholders. A deployment's names (bucket names,
+  `LOG_ORIGIN`, any other var, `routes`, and the remote contract tests' bucket) go in
+  `worker/deploy.local.json`, gitignored, which a hard reset keeps. `npm run deploy`
+  (`scripts/deploy.ts`) writes `worker/wrangler.deploy.jsonc` (gitignored, beside `wrangler.jsonc`
+  so relative paths resolve) by replacing exactly one match per value, binding the buckets to the
+  `*_BUCKET_NAME` vars and adding `routes`, and runs `wrangler deploy -c` with it. It refuses to run
+  without both bucket names and `LOG_ORIGIN`, with an origin `validateOrigin` rejects or that does not
+  end in `/log/<LOG_NAME>`, with equal buckets, or with routes that do not serve the origin's host.
+  `worker/vitest.remote.config.ts` writes a gitignored copy of the contract config with
+  `contractBucket` in the same way.
+- **Guard:** `worker/test/committed-config.test.ts` reads the committed configs as text (Vite
+  `?raw`) and fails if any bucket name is not an `example-` placeholder, if `LOG_ORIGIN` is not the
+  placeholder, or if the simulator's bucket and log differ from the Worker's. Applying 29d3df1's
+  names makes both of its tests fail.
+- **Alternatives:** wrangler `env` sections (committed, so the names would be too); keeping the
+  edit uncommitted (lost on the deploy host's hard reset, and it breaks the dev simulator); a
+  `--var` override at deploy (bucket bindings and routes cannot be set that way).
+- **Checked:** `npm run deploy -- --dry-run` with example values shows the bindings, vars and route
+  from `deploy.local.json`; without `LOG_ORIGIN` it stops. An audit under `wrangler dev` with the
+  committed configs logs the simulator's objects and finishes again.
+- **Not changed:** the real names remain in the history of 29d3df1 and of D9.2's commit (which
+  regenerated `worker-configuration.d.ts` from it).

@@ -26,7 +26,8 @@ names are the committed placeholders; use your own.
 - One kind of key still stops an audit: a key `k` next to `k:` followed by a digit or another byte
   up to `9` (`c` and `c:0`), which R2 orders by data `list()` does not return. The demo has none;
   use a monitored bucket that holds only the demo's objects.
-- The Worker deployed (`npx wrangler deploy -c worker/wrangler.jsonc`) and reachable at `$HOST`.
+- The Worker deployed (`npm run deploy`, with your names in `worker/deploy.local.json`) and
+  reachable at `$HOST`.
 - The Go CLI built (`cd cli && go build -o r2notary ./cmd/r2notary`), and:
 
 ```sh
