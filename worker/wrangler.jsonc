@@ -19,8 +19,8 @@
     "bindings": [{ "name": "SEQUENCER", "class_name": "Sequencer" }],
   },
   "r2_buckets": [
-    { "binding": "MONITORED", "bucket_name": "example-monitored-bucket" },
-    { "binding": "LOG", "bucket_name": "example-log-bucket" },
+    { "binding": "MONITORED", "bucket_name": "r2notary-monitored-bucket" },
+    { "binding": "LOG", "bucket_name": "r2notary-log-bucket" },
   ],
   // The consumer acks a batch once the Sequencer has it, and retries it with backoff otherwise
   // (worker/src/ingest.ts). After max_retries a message moves to the dead-letter queue, which this
@@ -71,8 +71,8 @@
     // The log's URL prefix without the scheme or a trailing slash (C2SP tlog-tiles SHOULD):
     // this Worker serves the log at https://<host>/log/<LOG_NAME>/.
     "LOG_ORIGIN": "r2notary.example.com/log/example-log",
-    "MONITORED_BUCKET_NAME": "example-monitored-bucket",
-    "LOG_BUCKET_NAME": "example-log-bucket",
+    "MONITORED_BUCKET_NAME": "r2notary-monitored-bucket",
+    "LOG_BUCKET_NAME": "r2notary-log-bucket",
     "CHECKPOINT_INTERVAL_MS": "5000",
     "BATCH_MAX_ENTRIES": "500",
     "DEDUPE_TTL_SECONDS": "86400",
