@@ -11,3 +11,5 @@ coverage/
 *.tsbuildinfo
 # local scratch output from benchmarks (committed results live in bench/results/)
 bench/tmp/
+# the Go CLI built by the README quickstart (cd cli && go build -o r2notary ./cmd/r2notary)
+cli/r2notary
